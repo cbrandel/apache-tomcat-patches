@@ -1,0 +1,517 @@
+Index: java/org/apache/catalina/filters/RemoteIpFilter.java
+===================================================================
+--- java/org/apache/catalina/filters/RemoteIpFilter.java	(revision 1808526)
++++ java/org/apache/catalina/filters/RemoteIpFilter.java	(working copy)
+@@ -57,8 +57,8 @@
+  * "X-Forwarded-For").
+  * </p>
+  * <p>
+- * Another feature of this servlet filter is to replace the apparent scheme (http/https) and server port with the scheme presented by a
+- * proxy or a load balancer via a request header (e.g. "X-Forwarded-Proto").
++ * Another feature of this servlet filter is to replace the apparent scheme (http/https), server host and server port with the scheme presented by a
++ * proxy or a load balancer via request headers (e.g. "X-Forwarded-Proto").
+  * </p>
+  * <p>
+  * This servlet filter proceeds as follows:
+@@ -462,7 +462,9 @@
+         protected String scheme;
+ 
+         protected boolean secure;
+-
++        
++        protected String serverName;
++        
+         protected int serverPort;
+ 
+         public XForwardedRequest(HttpServletRequest request) {
+@@ -472,6 +474,7 @@
+             this.remoteHost = request.getRemoteHost();
+             this.scheme = request.getScheme();
+             this.secure = request.isSecure();
++            this.serverName = request.getServerName();
+             this.serverPort = request.getServerPort();
+ 
+             headers = new HashMap<>();
+@@ -565,6 +568,11 @@
+         }
+ 
+         @Override
++        public String getServerName() {
++            return serverName;
++        }
++
++        @Override
+         public int getServerPort() {
+             return serverPort;
+         }
+@@ -612,6 +620,10 @@
+             this.secure = secure;
+         }
+ 
++        public void setServerName(String serverName) {
++            this.serverName = serverName;
++        }
++
+         public void setServerPort(int serverPort) {
+             this.serverPort = serverPort;
+         }
+@@ -659,6 +671,8 @@
+ 
+     protected static final String PROTOCOL_HEADER_HTTPS_VALUE_PARAMETER = "protocolHeaderHttpsValue";
+ 
++    protected static final String HOST_HEADER_PARAMETER = "hostHeader";
++    
+     protected static final String PORT_HEADER_PARAMETER = "portHeader";
+ 
+     protected static final String CHANGE_LOCAL_PORT_PARAMETER = "changeLocalPort";
+@@ -728,6 +742,8 @@
+ 
+     private String protocolHeaderHttpsValue = "https";
+ 
++    private String hostHeader = null;
++    
+     private String portHeader = null;
+ 
+     private boolean changeLocalPort = false;
+@@ -824,11 +840,11 @@
+                 } else if (protocolHeaderHttpsValue.equalsIgnoreCase(protocolHeaderValue)) {
+                     xRequest.setSecure(true);
+                     xRequest.setScheme("https");
+-                    setPorts(xRequest, httpsServerPort);
++                    setHostAndPorts(xRequest, httpsServerPort);
+                 } else {
+                     xRequest.setSecure(false);
+                     xRequest.setScheme("http");
+-                    setPorts(xRequest, httpServerPort);
++                    setHostAndPorts(xRequest, httpServerPort);
+                 }
+             }
+ 
+@@ -865,6 +881,27 @@
+ 
+     }
+ 
++    private void setHostAndPorts(XForwardedRequest xrequest, int defaultPort) {
++        int port = defaultPort;
++        if (getHostHeader() != null) {
++            String hostHeaderValue = xrequest.getHeader(getHostHeader());
++            if (hostHeaderValue != null) {
++                String hostAndPort[] = hostHeaderValue.split(",")[0].trim().split(":", 2);
++                String host = hostAndPort[0];
++                if (hostAndPort.length == 2) {
++                        try {
++                                port = Integer.parseInt(hostAndPort[1]);
++                        } catch (NumberFormatException nfe) {
++                            log.debug("Invalid port value [" + hostHeaderValue +
++                                      "] provided in header [" + getHostHeader() + "]");
++                        }
++                }
++                xrequest.setServerName(host);
++            }
++        }
++        setPorts(xrequest, port);
++    }
++    
+     private void setPorts(XForwardedRequest xrequest, int defaultPort) {
+         int port = defaultPort;
+         if (getPortHeader() != null) {
+@@ -912,6 +949,10 @@
+         return protocolHeader;
+     }
+ 
++    public String getHostHeader() {
++        return hostHeader;
++    }
++
+     public String getPortHeader() {
+         return portHeader;
+     }
+Index: java/org/apache/catalina/valves/LocalStrings.properties
+===================================================================
+--- java/org/apache/catalina/valves/LocalStrings.properties	(revision 1808526)
++++ java/org/apache/catalina/valves/LocalStrings.properties	(working copy)
+@@ -44,6 +44,7 @@
+ errorReportValve.noDescription=No description available
+ 
+ # Remote IP valve
++remoteIpValve.invalidHostHeader=Invalid value [{0}] found for port in HTTP header [{1}]
+ remoteIpValve.invalidPortHeader=Invalid value [{0}] found for port in HTTP header [{1}]
+ 
+ # Request filter valve - RemoteAddrValve, RemoteHostValve
+Index: java/org/apache/catalina/valves/RemoteIpValve.java
+===================================================================
+--- java/org/apache/catalina/valves/RemoteIpValve.java	(revision 1808526)
++++ java/org/apache/catalina/valves/RemoteIpValve.java	(working copy)
+@@ -40,8 +40,8 @@
+  * headers (e.g. "X-Forwarded-For").
+  * </p>
+  * <p>
+- * Another feature of this valve is to replace the apparent scheme (http/https) and server port with the scheme presented by a proxy or a
+- * load balancer via a request header (e.g. "X-Forwarded-Proto").
++ * Another feature of this valve is to replace the apparent scheme (http/https), server host and server port with the scheme presented by a proxy or a
++ * load balancer via request headers (e.g. "X-Forwarded-Proto").
+  * </p>
+  * <p>
+  * This valve proceeds as follows:
+@@ -423,6 +423,8 @@
+      */
+     private String protocolHeaderHttpsValue = "https";
+ 
++    private String hostHeader = null;
++    
+     private String portHeader = null;
+ 
+     /**
+@@ -474,6 +476,26 @@
+ 
+     /**
+      * Obtain the name of the HTTP header used to override the value returned
++     * by {@link Request#getServerName()}.
++     *
++     * @return  The HTTP header name
++     */
++    public String getHostHeader() {
++        return hostHeader;
++    }
++
++    /**
++     * Set the name of the HTTP header used to override the value returned
++     * by {@link Request#getServerName()}.
++     *
++     * @param   hostHeader  The HTTP header name
++     */
++    public void setHostHeader(String hostHeader) {
++        this.hostHeader = hostHeader;
++    }
++    
++    /**
++     * Obtain the name of the HTTP header used to override the value returned
+      * by {@link Request#getServerPort()} and (optionally depending on {link
+      * {@link #isChangeLocalPort()} {@link Request#getLocalPort()}.
+      *
+@@ -566,6 +588,7 @@
+         final String originalRemoteHost = request.getRemoteHost();
+         final String originalScheme = request.getScheme();
+         final boolean originalSecure = request.isSecure();
++        final String originalServerName = request.getServerName();
+         final int originalServerPort = request.getServerPort();
+         final String originalProxiesHeader = request.getHeader(proxiesHeader);
+         final String originalRemoteIpHeader = request.getHeader(remoteIpHeader);
+@@ -638,13 +661,13 @@
+                     // use request.coyoteRequest.scheme instead of request.setScheme() because request.setScheme() is no-op in Tomcat 6.0
+                     request.getCoyoteRequest().scheme().setString("https");
+ 
+-                    setPorts(request, httpsServerPort);
++                    setHostAndPorts(request, httpsServerPort);
+                 } else {
+                     request.setSecure(false);
+                     // use request.coyoteRequest.scheme instead of request.setScheme() because request.setScheme() is no-op in Tomcat 6.0
+                     request.getCoyoteRequest().scheme().setString("http");
+ 
+-                    setPorts(request, httpServerPort);
++                    setHostAndPorts(request, httpServerPort);
+                 }
+             }
+ 
+@@ -684,6 +707,7 @@
+             // use request.coyoteRequest.scheme instead of request.setScheme() because request.setScheme() is no-op in Tomcat 6.0
+             request.getCoyoteRequest().scheme().setString(originalScheme);
+ 
++            request.getCoyoteRequest().serverName().setString(originalServerName);
+             request.setServerPort(originalServerPort);
+ 
+             if (originalProxiesHeader == null || originalProxiesHeader.length() == 0) {
+@@ -700,6 +724,30 @@
+         }
+     }
+ 
++    private void setHostAndPorts(Request request, int defaultPort) {
++        int port = defaultPort;
++        if (hostHeader != null) {
++            String hostHeaderValue = request.getHeader(hostHeader);
++            if (hostHeaderValue != null) {
++            	String hostAndPort[] = hostHeaderValue.split(",")[0].trim().split(":", 2);
++            	String host = hostAndPort[0];
++            	if (hostAndPort.length == 2) {
++	            	try {
++	            		port = Integer.parseInt(hostAndPort[1]);
++	            	} catch (NumberFormatException nfe) {
++	                    if (log.isDebugEnabled()) {
++	                        log.debug(sm.getString(
++	                                "remoteIpValve.invalidHostHeader",
++	                                hostHeaderValue, hostHeader), nfe);
++	                    }
++	                }
++            	}
++            	request.getCoyoteRequest().serverName().setString(host);
++            }
++        }
++        setPorts(request, port);
++    }
++    
+     private void setPorts(Request request, int defaultPort) {
+         int port = defaultPort;
+         if (portHeader != null) {
+Index: test/org/apache/catalina/filters/TestRemoteIpFilter.java
+===================================================================
+--- test/org/apache/catalina/filters/TestRemoteIpFilter.java	(revision 1808526)
++++ test/org/apache/catalina/filters/TestRemoteIpFilter.java	(working copy)
+@@ -40,6 +40,7 @@
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
+ 
+ import org.junit.Assert;
+ import org.junit.Test;
+@@ -100,6 +101,7 @@
+             writer.println("request.remoteHost=" + request.getRemoteHost());
+             writer.println("request.secure=" + request.isSecure());
+             writer.println("request.scheme=" + request.getScheme());
++            writer.println("request.serverName=" + request.getServerName());
+             writer.println("request.serverPort=" + request.getServerPort());
+ 
+             writer.println();
+@@ -484,6 +486,85 @@
+     }
+ 
+     @Test
++    public void testInvokeXforwardedHost() throws Exception {
++        // PREPARE
++        FilterDef filterDef = new FilterDef();
++        filterDef.addInitParameter("hostHeader", "x-forwarded-host");
++        filterDef.addInitParameter("portHeader", "x-forwarded-port");
++        filterDef.addInitParameter("protocolHeader", "x-forwarded-proto");
++        
++        MockHttpServletRequest request = new MockHttpServletRequest();
++        // client ip
++        request.setRemoteAddr("192.168.0.10");
++        request.setRemoteHost("192.168.0.10");
++        // protocol
++        request.setSecure(false);
++        request.setServerPort(8080);
++        request.setScheme("http");
++        // host and port
++        request.getCoyoteRequest().serverName().setString("10.0.0.1");
++        request.setHeader("x-forwarded-host", "example.com");
++        request.setHeader("x-forwarded-port", "8443");
++        request.setHeader("x-forwarded-proto", "https");
++
++        // TEST
++        HttpServletRequest actualRequest = testRemoteIpFilter(filterDef, request).getRequest();
++        
++        // VERIFY
++        // protocol
++        String actualServerName = actualRequest.getServerName();
++        assertEquals("postInvoke serverName", "example.com", actualServerName);
++        
++        String actualScheme = actualRequest.getScheme();
++        assertEquals("postInvoke scheme", "https", actualScheme);
++        
++        int actualServerPort = actualRequest.getServerPort();
++        assertEquals("postInvoke serverPort", 8443, actualServerPort);
++
++        boolean actualSecure = actualRequest.isSecure();
++        assertTrue("postInvoke secure", actualSecure);
++    }
++
++    @Test
++    public void testInvokeXforwardedHostAndPort() throws Exception {
++        // PREPARE
++        FilterDef filterDef = new FilterDef();
++        filterDef.addInitParameter("hostHeader", "x-forwarded-host");
++        filterDef.addInitParameter("portHeader", "x-forwarded-port");
++        filterDef.addInitParameter("protocolHeader", "x-forwarded-proto");
++        
++        MockHttpServletRequest request = new MockHttpServletRequest();
++        // client ip
++        request.setRemoteAddr("192.168.0.10");
++        request.setRemoteHost("192.168.0.10");
++        // protocol
++        request.setSecure(false);
++        request.setServerPort(8080);
++        request.setScheme("http");
++        // host and port
++        request.getCoyoteRequest().serverName().setString("10.0.0.1");
++        request.setHeader("x-forwarded-host", "example.com:8443");
++        request.setHeader("x-forwarded-proto", "https");
++
++        // TEST
++        HttpServletRequest actualRequest = testRemoteIpFilter(filterDef, request).getRequest();
++        
++        // VERIFY
++        // protocol
++        String actualServerName = actualRequest.getServerName();
++        assertEquals("postInvoke serverName", "example.com", actualServerName);
++        
++        String actualScheme = actualRequest.getScheme();
++        assertEquals("postInvoke scheme", "https", actualScheme);
++        
++        int actualServerPort = actualRequest.getServerPort();
++        assertEquals("postInvoke serverPort", 8443, actualServerPort);
++
++        boolean actualSecure = actualRequest.isSecure();
++        assertTrue("postInvoke secure", actualSecure);
++    }
++    
++    @Test
+     public void testListToCommaDelimitedString() {
+         String[] actual = RemoteIpFilter.commaDelimitedListToStringArray("element1, element2, element3");
+         String[] expected = new String[] { "element1", "element2", "element3" };
+Index: test/org/apache/catalina/valves/TestRemoteIpValve.java
+===================================================================
+--- test/org/apache/catalina/valves/TestRemoteIpValve.java	(revision 1808526)
++++ test/org/apache/catalina/valves/TestRemoteIpValve.java	(working copy)
+@@ -47,6 +47,7 @@
+         private String remoteHost;
+         private String scheme;
+         private boolean secure;
++        private String serverName;
+         private int serverPort;
+         private String forwardedFor;
+         private String forwardedBy;
+@@ -63,6 +64,10 @@
+             return scheme;
+         }
+ 
++        public String getServerName() {
++            return serverName;
++        }
++
+         public int getServerPort() {
+             return serverPort;
+         }
+@@ -85,6 +90,7 @@
+             this.remoteAddr = request.getRemoteAddr();
+             this.scheme = request.getScheme();
+             this.secure = request.isSecure();
++            this.serverName = request.getServerName();
+             this.serverPort = request.getServerPort();
+             this.forwardedFor = request.getHeader("x-forwarded-for");
+             this.forwardedBy = request.getHeader("x-forwarded-by");
+@@ -654,7 +660,7 @@
+         assertEquals("x-forwarded-proto is null", "https", actualScheme);
+ 
+         int actualServerPort = remoteAddrAndHostTrackerValve.getServerPort();
+-        assertEquals("x-forwarded-proto is null", 8443, actualServerPort);
++        assertEquals("x-forwarded-port is null", 8443, actualServerPort);
+ 
+         boolean actualSecure = remoteAddrAndHostTrackerValve.isSecure();
+         assertTrue("x-forwarded-proto is null", actualSecure);
+@@ -670,6 +676,116 @@
+     }
+ 
+     @Test
++    public void testInvokeXforwardedHost() throws Exception {
++
++        // PREPARE
++        RemoteIpValve remoteIpValve = new RemoteIpValve();
++        remoteIpValve.setHostHeader("x-forwarded-host");
++        remoteIpValve.setProtocolHeader("x-forwarded-proto");
++        RemoteAddrAndHostTrackerValve remoteAddrAndHostTrackerValve = new RemoteAddrAndHostTrackerValve();
++        remoteIpValve.setNext(remoteAddrAndHostTrackerValve);
++
++        Request request = new MockRequest();
++        request.setCoyoteRequest(new org.apache.coyote.Request());
++        // client ip
++        request.setRemoteAddr("192.168.0.10");
++        request.setRemoteHost("192.168.0.10");
++        // protocol
++        request.setSecure(false);
++        request.setServerPort(8080);
++        request.getCoyoteRequest().scheme().setString("http");
++        // host and port
++        request.getCoyoteRequest().serverName().setString("10.0.0.1");
++        request.getCoyoteRequest().getMimeHeaders().addValue("x-forwarded-host").setString("example.com:8443");
++        request.getCoyoteRequest().getMimeHeaders().addValue("x-forwarded-proto").setString("https");
++        
++        // TEST
++        remoteIpValve.invoke(request, null);
++
++        // VERIFY
++        // protocol
++        String actualServerName = remoteAddrAndHostTrackerValve.getServerName();
++        assertEquals("tracked serverName", "example.com", actualServerName);
++        
++        String actualScheme = remoteAddrAndHostTrackerValve.getScheme();
++        assertEquals("tracked scheme", "https", actualScheme);
++        
++        int actualServerPort = remoteAddrAndHostTrackerValve.getServerPort();
++        assertEquals("tracked serverPort", 8443, actualServerPort);
++
++        boolean actualSecure = remoteAddrAndHostTrackerValve.isSecure();
++        assertTrue("tracked secure", actualSecure);
++
++        String actualPostInvokeServerName = request.getServerName();
++        assertEquals("postInvoke serverName", "10.0.0.1", actualPostInvokeServerName);
++        
++        boolean actualPostInvokeSecure = request.isSecure();
++        assertFalse("postInvoke secure", actualPostInvokeSecure);
++
++        int actualPostInvokeServerPort = request.getServerPort();
++        assertEquals("postInvoke serverPort", 8080, actualPostInvokeServerPort);
++
++        String actualPostInvokeScheme = request.getScheme();
++        assertEquals("postInvoke scheme", "http", actualPostInvokeScheme);
++    }
++
++    @Test
++    public void testInvokeXforwardedHostAndPort() throws Exception {
++
++        // PREPARE
++        RemoteIpValve remoteIpValve = new RemoteIpValve();
++        remoteIpValve.setHostHeader("x-forwarded-host");
++        remoteIpValve.setPortHeader("x-forwarded-port");
++        remoteIpValve.setProtocolHeader("x-forwarded-proto");
++        RemoteAddrAndHostTrackerValve remoteAddrAndHostTrackerValve = new RemoteAddrAndHostTrackerValve();
++        remoteIpValve.setNext(remoteAddrAndHostTrackerValve);
++
++        Request request = new MockRequest();
++        request.setCoyoteRequest(new org.apache.coyote.Request());
++        // client ip
++        request.setRemoteAddr("192.168.0.10");
++        request.setRemoteHost("192.168.0.10");
++        // protocol
++        request.setSecure(false);
++        request.setServerPort(8080);
++        request.getCoyoteRequest().scheme().setString("http");
++        // host and port
++        request.getCoyoteRequest().serverName().setString("10.0.0.1");
++        request.getCoyoteRequest().getMimeHeaders().addValue("x-forwarded-host").setString("example.com");
++        request.getCoyoteRequest().getMimeHeaders().addValue("x-forwarded-port").setString("8443");
++        request.getCoyoteRequest().getMimeHeaders().addValue("x-forwarded-proto").setString("https");
++        
++        // TEST
++        remoteIpValve.invoke(request, null);
++
++        // VERIFY
++        // protocol
++        String actualServerName = remoteAddrAndHostTrackerValve.getServerName();
++        assertEquals("tracked serverName", "example.com", actualServerName);
++        
++        String actualScheme = remoteAddrAndHostTrackerValve.getScheme();
++        assertEquals("tracked scheme", "https", actualScheme);
++        
++        int actualServerPort = remoteAddrAndHostTrackerValve.getServerPort();
++        assertEquals("tracked serverPort", 8443, actualServerPort);
++
++        boolean actualSecure = remoteAddrAndHostTrackerValve.isSecure();
++        assertTrue("tracked secure", actualSecure);
++
++        String actualPostInvokeServerName = request.getServerName();
++        assertEquals("postInvoke serverName", "10.0.0.1", actualPostInvokeServerName);
++        
++        boolean actualPostInvokeSecure = request.isSecure();
++        assertFalse("postInvoke secure", actualPostInvokeSecure);
++
++        int actualPostInvokeServerPort = request.getServerPort();
++        assertEquals("postInvoke serverPort", 8080, actualPostInvokeServerPort);
++
++        String actualPostInvokeScheme = request.getScheme();
++        assertEquals("postInvoke scheme", "http", actualPostInvokeScheme);
++    }
++    
++    @Test
+     public void testInvokeNotAllowedRemoteAddr() throws Exception {
+         // PREPARE
+         RemoteIpValve remoteIpValve = new RemoteIpValve();
